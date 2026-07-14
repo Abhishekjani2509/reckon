@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch makes an in-flight run obsolete; don't burn
+# runners finishing work nobody will read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
+
+      # `build` includes `test`, so this widens on its own as tests land -- no
+      # workflow edit needed to start running them.
+      - name: Build
+        working-directory: command-service
+        run: ./gradlew build --no-daemon
+
+      - name: Upload test results
+        # `always()`: test reports are most valuable exactly when the build failed.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: command-service/build/reports/tests/
+          if-no-files-found: ignore
+
+  smoke:
+    name: Stack boots and connects
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
+
+      # Deliberately the real docker-compose.yml rather than CI-specific service
+      # containers: this way the file contributors actually run is the file under
+      # test, and it cannot rot behind a parallel CI definition.
+      - name: Start infrastructure
+        run: docker compose up -d --wait
+
+      - name: Build service jar
+        working-directory: command-service
+        run: ./gradlew bootJar --no-daemon
+
+      - name: Boot service against the stack
+        working-directory: command-service
+        run: |
+          java -jar build/libs/command-service-*[!plain].jar &
+          echo $! > /tmp/service.pid
+          for i in $(seq 1 45); do
+            if curl -sf localhost:8080/actuator/health > /dev/null 2>&1; then
+              echo "service is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "service failed to become healthy within 90s"; exit 1
+
+      # The real assertion. `status: UP` alone would pass with a dead database,
+      # so this checks the db component specifically -- proving Flyway migrated
+      # and the connection pool is live.
+      - name: Assert database connectivity
+        run: |
+          health=$(curl -s localhost:8080/actuator/health)
+          echo "$health" | jq .
+          db=$(echo "$health" | jq -r '.components.db.status')
+          if [ "$db" != "UP" ]; then
+            echo "::error::database component is '$db', expected UP"; exit 1
+          fi
+          echo "database is UP"
+
+      - name: Assert event store schema
+        run: |
+          # The unique constraint is this system's concurrency control. If it ever
+          # goes missing the service still boots happily and silently permits
+          # double-spend, so CI asserts its existence directly.
+          constraint=$(docker compose exec -T postgres psql -U reckon -d reckon -tAc \
+            "SELECT conname FROM pg_constraint WHERE conname = 'events_aggregate_version_unique';")
+          if [ -z "$constraint" ]; then
+            echo "::error::events_aggregate_version_unique is missing from the event store"
+            exit 1
+          fi
+          echo "optimistic-concurrency constraint present"
+
+      - name: Assert event log rejects mutation
+        run: |
+          # Append-only is a guarantee the audit trail depends on. Verify the
+          # database actually refuses, rather than trusting that it would.
+          docker compose exec -T postgres psql -U reckon -d reckon -q -c \
+            "INSERT INTO events (event_id, aggregate_id, aggregate_type, version, event_type, payload)
+             VALUES (gen_random_uuid(), 'ci_probe', 'Account', 1, 'AccountOpened', '{}'::jsonb);"
+          if docker compose exec -T postgres psql -U reckon -d reckon -q -v ON_ERROR_STOP=1 -c \
+            "UPDATE events SET event_type = 'tampered' WHERE aggregate_id = 'ci_probe';" 2>/dev/null; then
+            echo "::error::events accepted an UPDATE -- the append-only trigger is not working"
+            exit 1
+          fi
+          echo "event log correctly rejected UPDATE"
+
+      - name: Service logs
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: |
+          [ -f /tmp/service.pid ] && kill "$(cat /tmp/service.pid)" 2>/dev/null || true
+          docker compose down -v
