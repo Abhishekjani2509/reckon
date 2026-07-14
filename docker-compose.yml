@@ -1,0 +1,86 @@
+## Reckon — local infrastructure.
+##
+## Three backing services, one command. Every container declares a healthcheck so
+## that `docker compose up --wait` can tell "started" apart from "actually ready" —
+## a Postgres container accepts TCP connections seconds before it will accept a
+## query, and command-service must not boot into that gap.
+
+services:
+  # The event store. Source of truth: every state change in Reckon is a row here.
+  postgres:
+    image: postgres:16-alpine
+    container_name: reckon-postgres
+    environment:
+      POSTGRES_DB: reckon
+      POSTGRES_USER: reckon
+      # Local development only. Real deployments inject credentials from a secret
+      # manager -- see the RECKON_DB_* overrides in application.yml.
+      POSTGRES_PASSWORD: reckon
+    ports:
+      # 5433 on the host because this machine already runs another PostgreSQL on the
+      # conventional 5432. Inside the compose network the port is still 5432 — only
+      # host-side clients (your IDE, DBeaver, psql) use 5433.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -d/-U scope the check to our DB and role: the bare command would pass
+      # against the transient bootstrap server Postgres runs during init.
+      test: ["CMD-SHELL", "pg_isready -U reckon -d reckon"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Kafka-compatible broker. Carries events from the outbox to the projectors.
+  # Redpanda speaks the Kafka API without a JVM or ZooKeeper.
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: reckon-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned          # yield the CPU; we're sharing a laptop, not owning a box
+      - --node-id=0
+      - --check=false
+      # Two listeners on purpose: clients inside the compose network reach the
+      # broker as `redpanda:9092`, clients on the host reach it as `localhost:19092`.
+      # Kafka clients connect once to discover the broker, then reconnect to the
+      # address the broker advertises — so a single listener would hand host
+      # clients an address only reachable from inside Docker.
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"   # Kafka API, from the host
+      - "9644:9644"     # admin API, used by the healthcheck below
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Hot balance cache. Treated as a disposable projection, never a source of truth --
+  # anything here can be rebuilt by replaying the event store.
+  redis:
+    image: redis:7-alpine
+    container_name: reckon-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  postgres-data:
+  redpanda-data:
+  redis-data:

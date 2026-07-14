@@ -1,0 +1,30 @@
+# Personal planning notes — not part of the project
+Reckon_Build_Brief_for_Claude_Code.md
+Reckon_Setup_and_Start_Guide.md
+
+# Gradle
+.gradle/
+build/
+
+# Java
+*.class
+*.jar
+*.log
+
+# The Gradle wrapper jar is committed on purpose: it is what makes `./gradlew` work on
+# a fresh clone without Gradle installed. Must come after *.jar (last match wins), and
+# needs the leading **/ to reach into each service's build rather than only the root.
+!**/gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+
+# Node (dashboard)
+node_modules/
+.next/
