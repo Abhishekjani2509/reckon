@@ -24,6 +24,32 @@ spring:
       # rewriting the data access as async.
       enabled: true
 
+  kafka:
+    # 19092 is Redpanda's host-facing listener (the in-network one is redpanda:9092).
+    bootstrap-servers: ${RECKON_KAFKA_BOOTSTRAP:localhost:19092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # acks=all + idempotence: the broker acknowledges only after replication, and the
+      # producer tags records so a retried send is de-duplicated rather than doubled.
+      # This makes the poller's own retries safe; it does not remove the republish that
+      # follows a crash between send and mark-published, which is why the consumer must
+      # still be idempotent.
+      acks: all
+      properties:
+        enable.idempotence: true
+
+reckon:
+  outbox:
+    topic: ${RECKON_OUTBOX_TOPIC:reckon.account.events}
+    # Partitions for the account-events topic. Keyed by aggregate_id, so per-account
+    # ordering holds while distinct accounts spread across partitions.
+    partitions: 3
+    # How often the poller drains, and how many rows it takes per pass. A short delay
+    # keeps write-to-publish latency low; the batch caps how long any one pass runs.
+    poll-delay-ms: 200
+    batch-size: 200
+
 management:
   endpoints:
     web:

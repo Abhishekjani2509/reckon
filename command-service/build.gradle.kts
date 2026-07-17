@@ -37,6 +37,10 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-validation")
 
+    // The Kafka producer for the outbox poller. Only the command service's poller
+    // publishes; it never consumes, but the starter brings both sides and that is fine.
+    implementation("org.springframework.kafka:spring-kafka")
+
     runtimeOnly("org.postgresql:postgresql")
 
     // Schema migrations as versioned SQL in the repo, applied on boot. Since Flyway

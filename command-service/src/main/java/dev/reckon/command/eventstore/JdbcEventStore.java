@@ -1,5 +1,8 @@
 package dev.reckon.command.eventstore;
 
+import dev.reckon.command.outbox.OutboxWriter;
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.dao.DuplicateKeyException;
@@ -15,9 +18,11 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class JdbcEventStore implements EventStore {
 
+    // occurred_at is set explicitly rather than left to the column default, so the exact
+    // instant written to the event row is the instant carried in the outbox envelope.
     private static final String INSERT_EVENT = """
-            INSERT INTO events (event_id, aggregate_id, aggregate_type, version, event_type, payload)
-            VALUES (?, ?, ?, ?, ?, ?::jsonb)
+            INSERT INTO events (event_id, aggregate_id, aggregate_type, version, event_type, payload, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?::jsonb, ?)
             """;
 
     // payload::text because the JDBC driver hands back JSONB as a PGobject; casting in
@@ -41,9 +46,11 @@ public class JdbcEventStore implements EventStore {
             rs.getTimestamp("occurred_at").toInstant());
 
     private final JdbcTemplate jdbc;
+    private final OutboxWriter outboxWriter;
 
-    public JdbcEventStore(JdbcTemplate jdbc) {
+    public JdbcEventStore(JdbcTemplate jdbc, OutboxWriter outboxWriter) {
         this.jdbc = jdbc;
+        this.outboxWriter = outboxWriter;
     }
 
     @Override
@@ -54,11 +61,14 @@ public class JdbcEventStore implements EventStore {
     /**
      * {@inheritDoc}
      *
-     * <p>Transactional so that a command's events are all-or-nothing. Note the retry must
-     * live <em>outside</em> this method: once Postgres raises the constraint violation the
-     * transaction is aborted and will accept no further statements, so retrying within it
-     * cannot work. Each attempt needs a fresh transaction, which is what calling this
-     * again gives.
+     * <p>Transactional so that a command's events are all-or-nothing. The outbox rows are
+     * written here too, in this same transaction — that shared atomicity is what lets the
+     * event and its publication intent commit as one, dissolving the dual-write problem.
+     *
+     * <p>Note the retry must live <em>outside</em> this method: once Postgres raises the
+     * constraint violation the transaction is aborted and will accept no further
+     * statements, so retrying within it cannot work. Each attempt needs a fresh
+     * transaction, which is what calling this again gives.
      */
     @Override
     @Transactional
@@ -67,13 +77,18 @@ public class JdbcEventStore implements EventStore {
         try {
             for (NewEvent event : events) {
                 version++;
+                UUID eventId = UUID.randomUUID();
+                Instant occurredAt = Instant.now();
                 jdbc.update(INSERT_EVENT,
-                        UUID.randomUUID(),
+                        eventId,
                         aggregateId,
                         aggregateType,
                         version,
                         event.eventType(),
-                        event.payloadJson());
+                        event.payloadJson(),
+                        Timestamp.from(occurredAt));
+                outboxWriter.enqueue(eventId, aggregateId, aggregateType,
+                        version, event.eventType(), event.payloadJson(), occurredAt);
             }
         } catch (DuplicateKeyException e) {
             // The table has two unique constraints: (aggregate_id, version) and event_id.
