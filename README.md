@@ -7,9 +7,9 @@ derived by replaying the event log. That one choice buys a complete audit trail,
 ability to reconstruct any balance at any point in time, and read models that can be
 dropped and rebuilt from the source of truth.
 
-> **Status:** in development. The event store and the write-side foundation are in place;
-> projections, the query service, and the dashboard are not yet built. See
-> [Roadmap](#roadmap).
+> **Status:** in development. The write side (event store, aggregate, transactional
+> outbox) and the read side (event-driven projections) are in place; the query service,
+> saga, and dashboard are not yet built. See [Roadmap](#roadmap).
 
 ## Why event sourcing
 
@@ -116,34 +116,73 @@ docker compose exec postgres psql -U reckon -d reckon -c '\d events'
 | PostgreSQL | 5433 | `postgres:5432` |
 | Redpanda (Kafka API) | 19092 | `redpanda:9092` |
 | Redis | 6379 | `redis:6379` |
-| command-service | 8080 | — |
+| command-service (write) | 8080 | — |
+| projection-service (read) | 8081 | — |
 
 Postgres is mapped to 5433 to avoid colliding with a local PostgreSQL on the default
-port. Override any connection setting via `RECKON_DB_URL`, `RECKON_DB_USER`, and
-`RECKON_DB_PASSWORD`.
+port. The container hosts **two databases**: `reckon` (the event store, owned by
+command-service) and `reckon_read` (read models, owned by projection-service). They share
+no tables — the only link between the two services is the event contract on Kafka.
+Override connection settings via `RECKON_DB_URL` / `RECKON_READ_DB_URL`, `RECKON_DB_USER`,
+and `RECKON_DB_PASSWORD`.
+
+Run the read side alongside the write side:
+
+```bash
+cd projection-service && ./gradlew bootRun
+```
+
+After a burst of commands, the read model converges to match the event log:
+
+```bash
+docker compose exec postgres psql -U reckon -d reckon_read -c \
+  'SELECT account_id, balance_minor, last_version FROM account_balances'
+```
 
 ## Layout
 
 ```
 reckon/
 ├── docker-compose.yml       # PostgreSQL + Redpanda + Redis
-└── command-service/         # write side: commands, event store
-    └── src/main/
-        ├── java/dev/reckon/command/
-        │   └── domain/account/    # Account commands and events
-        └── resources/db/migration/  # event store schema
+├── docker/postgres/init/    # creates the reckon_read database on first boot
+├── command-service/         # write side: commands, aggregate, event store, outbox
+│   └── src/main/java/dev/reckon/command/
+│       ├── domain/account/    # aggregate, commands, events
+│       ├── eventstore/        # append-only store, optimistic concurrency
+│       └── outbox/            # transactional outbox + poller
+└── projection-service/      # read side: consumes events, builds read models
+    └── src/main/java/dev/reckon/projection/
+        ├── consumer/          # Kafka listener + event envelope
+        └── projection/        # balance projector, idempotent by version
 ```
 
-Each service is an independent Gradle build. They share event *contracts*, never a
-database — a service that reaches into another's tables is not a separate service.
+Each service is an independent Gradle build with its own database. They share event
+*contracts*, never storage — a service that reaches into another's tables is not a
+separate service.
+
+## The read side (CQRS)
+
+`projection-service` consumes the account event stream from Kafka and maintains
+`account_balances` — one denormalised row per account, current balance ready to read
+without replaying a stream. It never touches the event store; it only projects.
+
+Two properties matter here:
+
+- **Idempotency.** Delivery is at-least-once, so any event may arrive more than once. The
+  projector applies a change only via a guarded `UPDATE ... WHERE last_version = :v - 1`,
+  so a re-delivered event matches zero rows and changes nothing. Reprocessing the entire
+  stream leaves every balance identical.
+- **Eventual consistency.** The read model lags the write by the time an event takes to
+  travel outbox → Kafka → projector. For a moment after a command the read balance is
+  stale. That is the defining trade of CQRS, and the lag is the health signal to watch.
 
 ## Roadmap
 
 - [x] Event store with optimistic concurrency
 - [x] Account command and event contracts
-- [ ] Account aggregate — rehydration, invariants, append
-- [ ] Transactional outbox → Redpanda
-- [ ] Projections and read models
+- [x] Account aggregate — rehydration, invariants, append
+- [x] Transactional outbox → Redpanda
+- [x] Projections and read models
 - [ ] Query service with Redis hot reads
 - [ ] Transfers as a saga with compensation
 - [ ] Command idempotency
