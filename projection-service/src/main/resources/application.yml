@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: projection-service
+
+  datasource:
+    # A SEPARATE database from command-service's `reckon`. projection-service owns
+    # reckon_read entirely and never touches the event store. The only link between the
+    # two services is the Kafka event contract.
+    url: ${RECKON_READ_DB_URL:jdbc:postgresql://localhost:5433/reckon_read}
+    username: ${RECKON_DB_USER:reckon}
+    password: ${RECKON_DB_PASSWORD:reckon}
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  threads:
+    virtual:
+      enabled: true
+
+  kafka:
+    bootstrap-servers: ${RECKON_KAFKA_BOOTSTRAP:localhost:19092}
+    consumer:
+      group-id: projection-service
+      # First run has no committed offset, so start from the beginning of the topic and
+      # build the read model from the whole history. This is also what makes a rebuild
+      # possible later: a fresh group id replays everything.
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # Commit offsets only after the listener returns without throwing. With the
+      # projector's version guard making re-delivery harmless, this gives at-least-once
+      # processing that is effectively exactly-once in its effect on the read model.
+      enable-auto-commit: false
+    listener:
+      ack-mode: record
+
+reckon:
+  projection:
+    topic: ${RECKON_OUTBOX_TOPIC:reckon.account.events}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+server:
+  # 8080 is command-service; the read side listens on 8081.
+  port: 8081
+
+logging:
+  level:
+    org.flywaydb: INFO
