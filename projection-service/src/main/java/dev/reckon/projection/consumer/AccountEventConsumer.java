@@ -1,6 +1,7 @@
 package dev.reckon.projection.consumer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.reckon.projection.projection.BalanceProjector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -14,9 +15,11 @@ import org.springframework.stereotype.Component;
  * in version order — which is exactly the guarantee the projector's version guard relies
  * on. Distinct accounts spread across partitions and are processed in parallel.
  *
- * <p>Deserialisation deliberately fails loud. A message that cannot be parsed is a broken
- * contract, not something to skip past silently — skipping would leave a permanent,
- * invisible hole in the read model.
+ * <p>The listener does not catch exceptions on purpose. Offsets commit only after it
+ * returns normally (ack-mode: record), so a failed projection leaves the offset
+ * uncommitted and the event is redelivered — safe, because the projection is idempotent.
+ * Deserialisation failures are equally loud: an unparseable message is a broken contract,
+ * not something to skip past into a silent hole in the read model.
  */
 @Component
 public class AccountEventConsumer {
@@ -24,15 +27,18 @@ public class AccountEventConsumer {
     private static final Logger log = LoggerFactory.getLogger(AccountEventConsumer.class);
 
     private final ObjectMapper objectMapper;
+    private final BalanceProjector projector;
 
-    public AccountEventConsumer(ObjectMapper objectMapper) {
+    public AccountEventConsumer(ObjectMapper objectMapper, BalanceProjector projector) {
         this.objectMapper = objectMapper;
+        this.projector = projector;
     }
 
     @KafkaListener(topics = "${reckon.projection.topic}", groupId = "${spring.kafka.consumer.group-id}")
     public void onMessage(String message) {
         EventEnvelope envelope = deserialize(message);
-        log.info("consumed {} v{} for {}", envelope.eventType(), envelope.version(), envelope.aggregateId());
+        projector.project(envelope);
+        log.debug("projected {} v{} for {}", envelope.eventType(), envelope.version(), envelope.aggregateId());
     }
 
     private EventEnvelope deserialize(String message) {
