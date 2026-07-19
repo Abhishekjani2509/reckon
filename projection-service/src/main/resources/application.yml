@@ -18,6 +18,11 @@ spring:
     virtual:
       enabled: true
 
+  data:
+    redis:
+      host: ${RECKON_REDIS_HOST:localhost}
+      port: ${RECKON_REDIS_PORT:6379}
+
   kafka:
     bootstrap-servers: ${RECKON_KAFKA_BOOTSTRAP:localhost:19092}
     consumer:

@@ -32,6 +32,10 @@ dependencies {
     // The Kafka consumer. This service is a consumer, where command-service was a producer.
     implementation("org.springframework.kafka:spring-kafka")
 
+    // Redis, written as a second read model. The projector keeps hot balances here
+    // alongside the Postgres read model -- cache-as-projection, one writer.
+    implementation("org.springframework.boot:spring-boot-starter-data-redis")
+
     runtimeOnly("org.postgresql:postgresql")
 
     implementation("org.flywaydb:flyway-core")
