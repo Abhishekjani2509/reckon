@@ -8,8 +8,9 @@ ability to reconstruct any balance at any point in time, and read models that ca
 dropped and rebuilt from the source of truth.
 
 > **Status:** in development. The write side (event store, aggregate, transactional
-> outbox) and the read side (event-driven projections) are in place; the query service,
-> saga, and dashboard are not yet built. See [Roadmap](#roadmap).
+> outbox), the read side (event-driven projections), and the query service (balances +
+> history, Redis-hot) are in place; the saga and dashboard are not yet built. See
+> [Roadmap](#roadmap).
 
 ## Why event sourcing
 
@@ -118,6 +119,7 @@ docker compose exec postgres psql -U reckon -d reckon -c '\d events'
 | Redis | 6379 | `redis:6379` |
 | command-service (write) | 8080 | — |
 | projection-service (read) | 8081 | — |
+| query-service (read API) | 8082 | — |
 
 Postgres is mapped to 5433 to avoid colliding with a local PostgreSQL on the default
 port. The container hosts **two databases**: `reckon` (the event store, owned by
@@ -150,10 +152,15 @@ reckon/
 │       ├── domain/account/    # aggregate, commands, events
 │       ├── eventstore/        # append-only store, optimistic concurrency
 │       └── outbox/            # transactional outbox + poller
-└── projection-service/      # read side: consumes events, builds read models
-    └── src/main/java/dev/reckon/projection/
-        ├── consumer/          # Kafka listener + event envelope
-        └── projection/        # balance projector, idempotent by version
+├── projection-service/      # read side: consumes events, builds read models
+│   └── src/main/java/dev/reckon/projection/
+│       ├── consumer/          # Kafka listener + event envelope
+│       ├── projection/        # balance + transaction projectors, idempotent by version
+│       └── redis/             # hot balance store
+└── query-service/           # read API: serves balances + history
+    └── src/main/java/dev/reckon/query/
+        ├── balance/           # Redis hot, Postgres fallback
+        └── transaction/       # cursor-paginated history
 ```
 
 Each service is an independent Gradle build with its own database. They share event
@@ -176,6 +183,22 @@ Two properties matter here:
   travel outbox → Kafka → projector. For a moment after a command the read balance is
   stale. That is the defining trade of CQRS, and the lag is the health signal to watch.
 
+`query-service` serves that read model over HTTP and is strictly read-only — no events,
+no schema, no writes:
+
+```bash
+# balance — served hot from Redis, X-Balance-Source header names the source
+curl -si localhost:8082/accounts/{id}/balance | grep -i x-balance-source
+
+# history — cursor pagination, newest first
+curl -s 'localhost:8082/accounts/{id}/transactions?limit=20'
+```
+
+Redis is treated as a projection, not a lookaside cache: the projector is its only
+writer, and query-service falls back to Postgres on a miss rather than populating it —
+so there is a single source of truth for the hot balance and none of the
+invalidation races that populate-on-read caching invites.
+
 ## Roadmap
 
 - [x] Event store with optimistic concurrency
@@ -183,7 +206,7 @@ Two properties matter here:
 - [x] Account aggregate — rehydration, invariants, append
 - [x] Transactional outbox → Redpanda
 - [x] Projections and read models
-- [ ] Query service with Redis hot reads
+- [x] Query service with Redis hot reads
 - [ ] Transfers as a saga with compensation
 - [ ] Command idempotency
 - [ ] Aggregate snapshots
