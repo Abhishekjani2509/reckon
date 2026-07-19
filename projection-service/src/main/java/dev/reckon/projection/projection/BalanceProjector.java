@@ -1,54 +1,34 @@
 package dev.reckon.projection.projection;
 
 import dev.reckon.projection.consumer.EventEnvelope;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import dev.reckon.projection.redis.HotBalanceStore;
 import org.springframework.stereotype.Component;
 
 /**
- * Folds account events into the account_balances read model.
+ * Projects an account event into the read models.
  *
- * <p>The mirror of the write-side aggregate's {@code apply}: it turns an event into a
- * balance change and nothing more. It makes no decisions and enforces no invariants —
- * the overdraft rule already ran on the write side before this event ever existed. A
- * projector that re-validated would be trying to veto the past.
+ * <p>Two steps, in order: apply to Postgres in a transaction, then — only if the event
+ * genuinely applied — write the resulting balance to Redis. Doing Redis after the DB
+ * commit means the hot balance is never ahead of the durable read model, and a duplicate
+ * event (which the balance guard rejects, yielding no snapshot) touches neither store.
  *
- * <p>Idempotency lives entirely in the repository's guarded SQL, so this class can be a
- * plain translation from event to delta.
+ * <p>The one honest edge: a crash between the DB commit and the Redis write leaves Redis
+ * briefly stale until the account's next event. The query service's Postgres fallback
+ * covers a missing key, and a production system would close the gap with write-through on
+ * read or periodic reconciliation. It is called out rather than hidden.
  */
 @Component
 public class BalanceProjector {
 
-    private static final Logger log = LoggerFactory.getLogger(BalanceProjector.class);
+    private final AccountReadModel readModel;
+    private final HotBalanceStore hotBalance;
 
-    private final AccountBalanceRepository repository;
-
-    public BalanceProjector(AccountBalanceRepository repository) {
-        this.repository = repository;
+    public BalanceProjector(AccountReadModel readModel, HotBalanceStore hotBalance) {
+        this.readModel = readModel;
+        this.hotBalance = hotBalance;
     }
 
     public void project(EventEnvelope event) {
-        switch (event.eventType()) {
-            case "AccountOpened" -> repository.insertOpened(
-                    event.aggregateId(),
-                    event.payload().get("owner").asText(),
-                    event.payload().get("currency").asText());
-
-            case "MoneyDeposited" -> repository.applyDelta(
-                    event.aggregateId(), amountMinor(event), event.version());
-
-            case "MoneyWithdrawn" -> repository.applyDelta(
-                    event.aggregateId(), -amountMinor(event), event.version());
-
-            // Transfer events are defined in the contract but not produced until the saga
-            // exists. Skip rather than crash the consumer: an unhandled type here would
-            // wedge the partition on retry. They will be projected when transfers land.
-            default -> log.warn("no projection for event type {}; skipping v{} of {}",
-                    event.eventType(), event.version(), event.aggregateId());
-        }
-    }
-
-    private static long amountMinor(EventEnvelope event) {
-        return event.payload().get("amountMinor").asLong();
+        readModel.apply(event).ifPresent(hotBalance::put);
     }
 }
