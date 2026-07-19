@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: query-service
+
+  datasource:
+    # Reads the read models projection-service maintains. This is the one deliberate
+    # database sharing in Reckon: the read model IS the contract between the projector and
+    # the query side. The write database (reckon) is never touched from here.
+    url: ${RECKON_READ_DB_URL:jdbc:postgresql://localhost:5433/reckon_read}
+    username: ${RECKON_DB_USER:reckon}
+    password: ${RECKON_DB_PASSWORD:reckon}
+
+  # query-service owns no schema, so Flyway stays off. projection-service is the sole
+  # migrator of reckon_read.
+  flyway:
+    enabled: false
+
+  data:
+    redis:
+      host: ${RECKON_REDIS_HOST:localhost}
+      port: ${RECKON_REDIS_PORT:6379}
+
+  threads:
+    virtual:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+server:
+  # 8080 command, 8081 projection, 8082 query.
+  port: 8082
