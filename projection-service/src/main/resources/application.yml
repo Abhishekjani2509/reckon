@@ -28,6 +28,13 @@ spring:
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        # Never let the consumer conjure the topic. If it subscribes before the topic
+        # exists and auto-creates it, it gets the broker default of ONE partition and then
+        # sticks to that stale view even after the real 3-partition topic appears -- so it
+        # would silently consume only a third of the stream. Off means it waits for the
+        # real topic instead.
+        allow.auto.create.topics: false
       # Commit offsets only after the listener returns without throwing. With the
       # projector's version guard making re-delivery harmless, this gives at-least-once
       # processing that is effectively exactly-once in its effect on the read model.
@@ -38,6 +45,9 @@ spring:
 reckon:
   projection:
     topic: ${RECKON_OUTBOX_TOPIC:reckon.account.events}
+    # Must match command-service's topic partition count. Declared here too so the topic
+    # exists correctly no matter which service boots first.
+    partitions: 3
 
 management:
   endpoints:
