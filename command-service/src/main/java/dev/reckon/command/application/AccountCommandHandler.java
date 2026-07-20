@@ -5,6 +5,7 @@ import dev.reckon.command.domain.account.AccountCommand;
 import dev.reckon.command.domain.account.AccountEvent;
 import dev.reckon.command.eventstore.ConcurrencyConflictException;
 import java.util.List;
+import java.util.function.Function;
 import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,6 +61,22 @@ public class AccountCommandHandler {
      * @throws ConcurrencyRetriesExhaustedException if contention outlasted every attempt
      */
     public Account handle(AccountCommand command) {
+        return execute(command.accountId(), account -> account.decide(command));
+    }
+
+    /**
+     * Loads an aggregate, applies a decision to it, and appends the result — retrying the
+     * whole cycle on a concurrent-write conflict.
+     *
+     * <p>This is the reusable core of the write side. A plain command is one decision on
+     * one aggregate; a transfer saga is several such decisions across two aggregates,
+     * composed by {@code TransferSaga}. Both go through here, so both get the same
+     * optimistic-concurrency guarantee.
+     *
+     * @param decide reads the loaded aggregate and returns the events to append, or throws
+     *     a domain exception to reject. Called afresh on every retry — see below.
+     */
+    public Account execute(String accountId, Function<Account, List<AccountEvent>> decide) {
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 
             // Reload and re-fold on every attempt. This is the important part: a retry
@@ -68,25 +85,25 @@ public class AccountCommandHandler {
             // refused against $10. Re-appending the previously decided events would append
             // facts the domain would no longer authorise — reintroducing by hand exactly
             // the double-spend the unique constraint just prevented.
-            Account account = repository.load(command.accountId());
+            Account account = repository.load(accountId);
             long expectedVersion = account.version();
 
             // May throw a domain exception (overdraft, unknown account). Those are the
             // caller's answer and must not be retried — retrying changes nothing, since
-            // the command is invalid against the state that exists.
-            List<AccountEvent> newEvents = account.decide(command);
+            // the decision is invalid against the state that exists.
+            List<AccountEvent> newEvents = decide.apply(account);
 
             try {
-                repository.append(command.accountId(), expectedVersion, newEvents);
+                repository.append(accountId, expectedVersion, newEvents);
                 account.applyAll(newEvents);
                 return account;
             } catch (ConcurrencyConflictException conflict) {
                 log.debug("conflict on {} at version {}, attempt {}/{}: reloading and deciding again",
-                        command.accountId(), expectedVersion, attempt, MAX_ATTEMPTS);
+                        accountId, expectedVersion, attempt, MAX_ATTEMPTS);
                 backOff(attempt);
             }
         }
-        throw new ConcurrencyRetriesExhaustedException(command.accountId(), MAX_ATTEMPTS);
+        throw new ConcurrencyRetriesExhaustedException(accountId, MAX_ATTEMPTS);
     }
 
     /** Full-jitter exponential backoff: a random wait in {@code [0, base * 2^attempt)}. */
