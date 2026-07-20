@@ -41,9 +41,18 @@ public class AccountReadModel {
             case "MoneyDeposited" -> applyDelta(event, amountMinor(event));
             case "MoneyWithdrawn" -> applyDelta(event, -amountMinor(event));
 
-            // Transfer events are defined in the contract but not produced until the saga
-            // exists. Skip rather than crash: an unhandled type would wedge the partition
-            // on retry. They are projected once transfers land.
+            // Transfer money movements: a debit and compensation on the source, a credit on
+            // the destination. Each moves the balance and is recorded in history.
+            case "MoneyDebited" -> applyDelta(event, -amountMinor(event));
+            case "MoneyCredited" -> applyDelta(event, amountMinor(event));
+            case "TransferCompensated" -> applyDelta(event, amountMinor(event));
+
+            // Transfer markers: no money moves, but the version MUST still advance, or the
+            // account's next real event would fail the projection's version guard and stall.
+            // Advanced without a history row -- history shows the money movements, not the
+            // saga's bookkeeping.
+            case "TransferInitiated", "TransferCompleted" -> advanceMarker(event);
+
             default -> {
                 log.warn("no projection for event type {}; skipping v{} of {}",
                         event.eventType(), event.version(), event.aggregateId());
@@ -72,6 +81,11 @@ public class AccountReadModel {
                 s.accountId(), event.version(), event.eventType(), signedAmount, s.balanceMinor(),
                 s.currency(), occurredAt(event), idempotencyKey(event)));
         return snapshot;
+    }
+
+    /** Advance the version for a balance-neutral marker; no history row. */
+    private Optional<BalanceSnapshot> advanceMarker(EventEnvelope event) {
+        return balances.advanceVersion(event.aggregateId(), event.version());
     }
 
     private static long amountMinor(EventEnvelope event) {

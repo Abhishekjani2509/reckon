@@ -39,6 +39,17 @@ public class AccountBalanceRepository {
             RETURNING account_id, balance_minor, currency, last_version
             """;
 
+    // Advances the version without changing the balance, under the same guard. For saga
+    // marker events (TransferInitiated, TransferCompleted) that carry a version but move no
+    // money: they must still advance last_version, or the next real event on the account
+    // would fail the guard and stall the projection.
+    private static final String ADVANCE_VERSION = """
+            UPDATE account_balances
+            SET last_version = ?, updated_at = now()
+            WHERE account_id = ? AND last_version = ?
+            RETURNING account_id, balance_minor, currency, last_version
+            """;
+
     private final JdbcTemplate jdbc;
 
     public AccountBalanceRepository(JdbcTemplate jdbc) {
@@ -59,6 +70,17 @@ public class AccountBalanceRepository {
      */
     public Optional<BalanceSnapshot> applyDelta(String accountId, long deltaMinor, long version) {
         return jdbc.query(APPLY_DELTA, this::mapSnapshot, deltaMinor, version, accountId, version - 1)
+                .stream().findFirst();
+    }
+
+    /**
+     * Advances the account to {@code version} without moving the balance, if it currently
+     * sits at {@code version - 1}. For balance-neutral marker events.
+     *
+     * @return the (unchanged-balance) snapshot, or empty if the guard rejected it
+     */
+    public Optional<BalanceSnapshot> advanceVersion(String accountId, long version) {
+        return jdbc.query(ADVANCE_VERSION, this::mapSnapshot, version, accountId, version - 1)
                 .stream().findFirst();
     }
 
