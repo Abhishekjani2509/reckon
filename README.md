@@ -8,9 +8,9 @@ ability to reconstruct any balance at any point in time, and read models that ca
 dropped and rebuilt from the source of truth.
 
 > **Status:** in development. The write side (event store, aggregate, transactional
-> outbox), the read side (event-driven projections), and the query service (balances +
-> history, Redis-hot) are in place; the saga and dashboard are not yet built. See
-> [Roadmap](#roadmap).
+> outbox, transfer saga, command idempotency), the read side (event-driven projections),
+> and the query service (balances + history, Redis-hot) are in place; the dashboard and
+> observability are not yet built. See [Roadmap](#roadmap).
 
 ## Why event sourcing
 
@@ -88,6 +88,27 @@ always used, where you void a bad entry with a balancing one rather than an eras
 Amounts are integer minor units (cents) in `BIGINT`, never floating point. `0.1 + 0.2`
 is `0.30000000000000004` in binary floating point, and rounding drift across a ledger is
 an audit failure.
+
+## Command idempotency
+
+Delivery is at-least-once and clients retry, so the same command can arrive twice. Every
+command carries a client-supplied idempotency key, and the write side records
+`(aggregate_id, idempotency_key)` in a `processed_commands` table **in the same
+transaction as the command's events**. A retry with the same key replays the stored
+result instead of applying again — a repeated deposit deposits once, a retried transfer
+debits once.
+
+```bash
+# same key twice → applied once; the second response carries the header
+curl -si -X POST localhost:8080/accounts/{id}/deposits \
+  -d '{"amountMinor":5000,"currency":"USD","idempotencyKey":"k1"}' | grep -i idempotent-replayed
+# → Idempotent-Replayed: true   (on the retry)
+```
+
+The `(aggregate_id, idempotency_key)` primary key is the real guarantee: concurrent
+identical commands race to insert it and exactly one wins, so even a burst of duplicates
+applies once. Transfers record the key on the source with the debit, so a retried transfer
+is blocked from debiting a second time.
 
 ## Running it
 
@@ -207,8 +228,8 @@ invalidation races that populate-on-read caching invites.
 - [x] Transactional outbox → Redpanda
 - [x] Projections and read models
 - [x] Query service with Redis hot reads
-- [ ] Transfers as a saga with compensation
-- [ ] Command idempotency
+- [x] Transfers as a saga with compensation
+- [x] Command idempotency
 - [ ] Aggregate snapshots
 - [ ] Dashboard with event-log / replay viewer
 - [ ] Metrics: throughput, projection lag, saga outcomes
