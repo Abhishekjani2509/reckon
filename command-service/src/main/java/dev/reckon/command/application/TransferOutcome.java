@@ -23,7 +23,18 @@ public record TransferOutcome(
         long sourceBalanceMinor,
         String failureReason
 ) {
-    public enum Status { COMPLETED, COMPENSATED }
+    /**
+     * PENDING is the placeholder a saga records with the debit, before it knows the
+     * terminal outcome. A retry that arrives while the original is still running (or after
+     * it crashed mid-saga) sees PENDING — and, crucially, is blocked from debiting again.
+     */
+    public enum Status { PENDING, COMPLETED, COMPENSATED }
+
+    static TransferOutcome pending(String transferId, String source, String destination,
+                                   long amount, String currency) {
+        return new TransferOutcome(transferId, Status.PENDING, source, destination,
+                amount, currency, 0, null);
+    }
 
     static TransferOutcome completed(String transferId, String source, String destination,
                                      long amount, String currency, long sourceBalance) {
@@ -39,5 +50,9 @@ public record TransferOutcome(
 
     public boolean isCompensated() {
         return status == Status.COMPENSATED;
+    }
+
+    public boolean isPending() {
+        return status == Status.PENDING;
     }
 }
