@@ -68,12 +68,75 @@ public final class Account {
             case AccountCommand.Deposit c -> decideDeposit(c);
             case AccountCommand.Withdraw c -> decideWithdraw(c);
 
-            // A transfer spans two aggregates, so no single Account can decide it — it
-            // resolves as a saga rather than an append. Failing loudly beats a silent
-            // no-op the caller would mistake for success.
+            // A transfer spans two aggregates, so no single Account can decide it in one
+            // shot. It is composed from the step decisions below (debit, credit, complete,
+            // compensate) by TransferSaga. Reaching here means a transfer was mis-routed
+            // through the single-aggregate path.
             case AccountCommand.Transfer c -> throw new UnsupportedOperationException(
-                    "Transfer is not implemented: it spans two aggregates and must run as a saga");
+                    "Transfer must run through TransferSaga, not the single-aggregate command path");
         };
+    }
+
+    // --- Transfer saga steps ---------------------------------------------------
+    //
+    // Each method decides ONE aggregate's part of a transfer. The saga calls them across
+    // the source and destination accounts and, on failure, composes the compensation. They
+    // are ordinary decisions — pure, validating, returning events — so each runs through
+    // the same optimistic-concurrency append as any other command.
+
+    /**
+     * Source side, step one: begin the transfer and debit. Returned atomically so the
+     * initiation marker and the debit share a version bump — the source can never be
+     * debited without a recorded intent, or marked as initiating without the debit.
+     *
+     * <p>This is where a transfer is rejected before any money moves: an underfunded
+     * source throws here, and the saga never touches the destination.
+     */
+    public List<AccountEvent> decideTransferDebit(
+            String transferId, String destinationAccountId, long amountMinor, String currency, String idempotencyKey) {
+        requireOpen();
+        if (accountId.equals(destinationAccountId)) {
+            throw new AccountExceptions.SelfTransferNotAllowed(accountId);
+        }
+        Money.requirePositive(amountMinor);
+        requireSameCurrency(currency);
+        if (balanceMinor < amountMinor) {
+            throw new AccountExceptions.InsufficientFunds(accountId, balanceMinor, amountMinor);
+        }
+        return List.of(
+                new AccountEvent.TransferInitiated(
+                        accountId, transferId, destinationAccountId, amountMinor, currency, idempotencyKey),
+                new AccountEvent.MoneyDebited(accountId, transferId, amountMinor, currency, idempotencyKey));
+    }
+
+    /**
+     * Destination side: credit the incoming funds. Fails if the destination does not exist
+     * or holds a different currency — and that failure, occurring after the source is
+     * already debited, is exactly what drives compensation.
+     */
+    public List<AccountEvent> decideTransferCredit(
+            String transferId, long amountMinor, String currency, String idempotencyKey) {
+        requireOpen();
+        requireSameCurrency(currency);
+        return List.of(new AccountEvent.MoneyCredited(accountId, transferId, amountMinor, currency, idempotencyKey));
+    }
+
+    /** Source side, success marker. Balance-neutral; records that the transfer completed. */
+    public List<AccountEvent> decideTransferComplete(String transferId, String idempotencyKey) {
+        requireOpen();
+        return List.of(new AccountEvent.TransferCompleted(accountId, transferId, idempotencyKey));
+    }
+
+    /**
+     * Source side, compensation: put the debited funds back after a failed credit. A
+     * forward event that reverses an earlier one — the log is never rewritten, so undo is
+     * a new fact, not a deletion. No overdraft check: crediting only increases the balance.
+     */
+    public List<AccountEvent> decideTransferCompensate(
+            String transferId, long amountMinor, String currency, String reason, String idempotencyKey) {
+        requireOpen();
+        return List.of(new AccountEvent.TransferCompensated(
+                accountId, transferId, amountMinor, currency, reason, idempotencyKey));
     }
 
     /**

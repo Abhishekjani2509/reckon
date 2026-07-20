@@ -42,4 +42,15 @@ public final class AccountExceptions {
                     .formatted(accountId, accountCurrency, commandCurrency));
         }
     }
+
+    /**
+     * Source and destination of a transfer are the same account. A self-transfer would
+     * debit and credit one aggregate for a net-zero result, so it is rejected as a
+     * meaningless request rather than executed as two cancelling events.
+     */
+    public static final class SelfTransferNotAllowed extends RuntimeException {
+        public SelfTransferNotAllowed(String accountId) {
+            super("cannot transfer from an account to itself: " + accountId);
+        }
+    }
 }
