@@ -35,4 +35,20 @@ public interface EventStore {
      * @throws ConcurrencyConflictException if another writer claimed the version first
      */
     void append(String aggregateId, String aggregateType, long expectedVersion, List<NewEvent> events);
+
+    /**
+     * As {@link #append}, but additionally records an idempotency row in the same
+     * transaction as the events.
+     *
+     * <p>The dedup row is written first, so a duplicate command is rejected before any
+     * event is persisted, and a duplicate-key violation there is distinguishable from a
+     * version conflict on the events. Because it shares the transaction, the events and the
+     * idempotency record commit together or roll back together.
+     *
+     * @throws DuplicateCommandException if this idempotency key was already recorded for
+     *     the aggregate — the command is a duplicate and must not be applied again
+     * @throws ConcurrencyConflictException if another writer claimed the version first
+     */
+    void append(String aggregateId, String aggregateType, long expectedVersion,
+                List<NewEvent> events, ProcessedCommand idempotency);
 }

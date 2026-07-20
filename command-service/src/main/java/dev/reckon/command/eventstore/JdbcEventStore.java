@@ -73,6 +73,33 @@ public class JdbcEventStore implements EventStore {
     @Override
     @Transactional
     public void append(String aggregateId, String aggregateType, long expectedVersion, List<NewEvent> events) {
+        append(aggregateId, aggregateType, expectedVersion, events, null);
+    }
+
+    private static final String INSERT_PROCESSED = """
+            INSERT INTO processed_commands (aggregate_id, idempotency_key, result_json)
+            VALUES (?, ?, ?::jsonb)
+            """;
+
+    @Override
+    @Transactional
+    public void append(String aggregateId, String aggregateType, long expectedVersion,
+                       List<NewEvent> events, ProcessedCommand idempotency) {
+
+        // The dedup row goes first. If this command was already applied, the primary key
+        // rejects it here, before a single event is written — so a duplicate never even
+        // reaches the event log, and its violation cannot be confused with the version
+        // conflict handled below. Both statements share this transaction, so if the events
+        // then fail on a version conflict, this row rolls back with them.
+        if (idempotency != null) {
+            try {
+                jdbc.update(INSERT_PROCESSED,
+                        aggregateId, idempotency.idempotencyKey(), idempotency.resultJson());
+            } catch (DuplicateKeyException e) {
+                throw new DuplicateCommandException(aggregateId, idempotency.idempotencyKey());
+            }
+        }
+
         long version = expectedVersion;
         try {
             for (NewEvent event : events) {
@@ -91,9 +118,9 @@ public class JdbcEventStore implements EventStore {
                         version, event.eventType(), event.payloadJson(), occurredAt);
             }
         } catch (DuplicateKeyException e) {
-            // The table has two unique constraints: (aggregate_id, version) and event_id.
-            // event_id is a fresh random UUID per insert, so a collision there is not a
-            // thing that happens — a duplicate key here means someone else took the
+            // The events table has two unique constraints: (aggregate_id, version) and
+            // event_id. event_id is a fresh random UUID per insert, so a collision there is
+            // not a thing that happens — a duplicate key here means someone else took the
             // version we were claiming.
             throw new ConcurrencyConflictException(aggregateId, expectedVersion, e);
         }
