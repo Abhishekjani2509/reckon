@@ -1,9 +1,9 @@
 package dev.reckon.command.api;
 
 import dev.reckon.command.application.AccountCommandHandler;
+import dev.reckon.command.application.CommandOutcome;
 import dev.reckon.command.application.TransferOutcome;
 import dev.reckon.command.application.TransferSaga;
-import dev.reckon.command.domain.account.Account;
 import dev.reckon.command.domain.account.AccountCommand;
 import jakarta.validation.Valid;
 import java.util.UUID;
@@ -13,7 +13,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -39,30 +38,41 @@ public class AccountController {
     }
 
     @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)
-    public AccountResponse open(@Valid @RequestBody OpenAccountRequest request) {
+    public ResponseEntity<AccountResponse> open(@Valid @RequestBody OpenAccountRequest request) {
         // Server-assigned id. A client-chosen id would let one client collide with
         // another's account and turn AccountAlreadyExists into a routine error rather
         // than the impossibility it should be.
         String accountId = "acc_" + UUID.randomUUID();
 
-        Account account = handler.handle(new AccountCommand.OpenAccount(
+        CommandOutcome outcome = handler.handle(new AccountCommand.OpenAccount(
                 accountId, request.owner(), request.currency(), request.idempotencyKey()));
-        return AccountResponse.from(account);
+        return respond(outcome, HttpStatus.CREATED);
     }
 
     @PostMapping("/{accountId}/deposits")
-    public AccountResponse deposit(@PathVariable String accountId, @Valid @RequestBody AmountRequest request) {
-        Account account = handler.handle(new AccountCommand.Deposit(
+    public ResponseEntity<AccountResponse> deposit(@PathVariable String accountId, @Valid @RequestBody AmountRequest request) {
+        CommandOutcome outcome = handler.handle(new AccountCommand.Deposit(
                 accountId, request.amountMinor(), request.currency(), request.idempotencyKey()));
-        return AccountResponse.from(account);
+        return respond(outcome, HttpStatus.OK);
     }
 
     @PostMapping("/{accountId}/withdrawals")
-    public AccountResponse withdraw(@PathVariable String accountId, @Valid @RequestBody AmountRequest request) {
-        Account account = handler.handle(new AccountCommand.Withdraw(
+    public ResponseEntity<AccountResponse> withdraw(@PathVariable String accountId, @Valid @RequestBody AmountRequest request) {
+        CommandOutcome outcome = handler.handle(new AccountCommand.Withdraw(
                 accountId, request.amountMinor(), request.currency(), request.idempotencyKey()));
-        return AccountResponse.from(account);
+        return respond(outcome, HttpStatus.OK);
+    }
+
+    /**
+     * Builds the response and marks a replayed (deduplicated) result with the
+     * {@code Idempotent-Replayed} header. A fresh application returns the given status; a
+     * replay returns 200, since nothing was created on the retry.
+     */
+    private ResponseEntity<AccountResponse> respond(CommandOutcome outcome, HttpStatus freshStatus) {
+        HttpStatus status = outcome.replayed() ? HttpStatus.OK : freshStatus;
+        return ResponseEntity.status(status)
+                .header("Idempotent-Replayed", String.valueOf(outcome.replayed()))
+                .body(AccountResponse.from(outcome.result()));
     }
 
     /**

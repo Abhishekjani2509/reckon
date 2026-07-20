@@ -3,8 +3,12 @@ package dev.reckon.command.application;
 import dev.reckon.command.domain.account.Account;
 import dev.reckon.command.domain.account.AccountCommand;
 import dev.reckon.command.domain.account.AccountEvent;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.reckon.command.eventstore.ConcurrencyConflictException;
+import dev.reckon.command.eventstore.DuplicateCommandException;
+import dev.reckon.command.eventstore.ProcessedCommand;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Function;
 import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
@@ -51,17 +55,74 @@ public class AccountCommandHandler {
     private static final long BASE_BACKOFF_MILLIS = 2;
 
     private final AccountRepository repository;
+    private final IdempotencyStore idempotencyStore;
+    private final ObjectMapper objectMapper;
 
-    public AccountCommandHandler(AccountRepository repository) {
+    public AccountCommandHandler(AccountRepository repository, IdempotencyStore idempotencyStore,
+                                 ObjectMapper objectMapper) {
         this.repository = repository;
+        this.idempotencyStore = idempotencyStore;
+        this.objectMapper = objectMapper;
     }
 
     /**
-     * @return the account as of the appended events
-     * @throws ConcurrencyRetriesExhaustedException if contention outlasted every attempt
+     * Runs a command idempotently: if its key was already applied to the account, the
+     * stored result is replayed; otherwise it is applied and recorded atomically with its
+     * events.
+     *
+     * @return the result and whether it was replayed from a prior application
      */
-    public Account handle(AccountCommand command) {
-        return execute(command.accountId(), account -> account.decide(command));
+    public CommandOutcome handle(AccountCommand command) {
+        String accountId = command.accountId();
+        String key = command.idempotencyKey();
+
+        // Fast path: a key we have already seen returns its stored result with no reload,
+        // decide, or append. This is the common case for a client retry.
+        Optional<CommandResult> replay = idempotencyStore.find(accountId, key).map(this::readResult);
+        if (replay.isPresent()) {
+            return new CommandOutcome(replay.get(), true);
+        }
+
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            Account account = repository.load(accountId);
+            long expectedVersion = account.version();
+
+            List<AccountEvent> newEvents = account.decide(command);
+            account.applyAll(newEvents);
+            CommandResult result = CommandResult.from(account);
+
+            try {
+                repository.append(accountId, expectedVersion, newEvents,
+                        new ProcessedCommand(key, writeResult(result)));
+                return new CommandOutcome(result, false);
+            } catch (ConcurrencyConflictException conflict) {
+                log.debug("conflict on {} at version {}, attempt {}/{}: reloading and deciding again",
+                        accountId, expectedVersion, attempt, MAX_ATTEMPTS);
+                backOff(attempt);
+            } catch (DuplicateCommandException duplicate) {
+                // A concurrent identical command committed the key between our fast-path
+                // check and this append. It is the winner; we replay its stored result.
+                return new CommandOutcome(
+                        readResult(idempotencyStore.find(accountId, key).orElseThrow()), true);
+            }
+        }
+        throw new ConcurrencyRetriesExhaustedException(accountId, MAX_ATTEMPTS);
+    }
+
+    private CommandResult readResult(String json) {
+        try {
+            return objectMapper.readValue(json, CommandResult.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("could not read stored command result: " + json, e);
+        }
+    }
+
+    private String writeResult(CommandResult result) {
+        try {
+            return objectMapper.writeValueAsString(result);
+        } catch (Exception e) {
+            throw new IllegalStateException("could not serialise command result", e);
+        }
     }
 
     /**
@@ -102,6 +163,36 @@ public class AccountCommandHandler {
                         accountId, expectedVersion, attempt, MAX_ATTEMPTS);
                 backOff(attempt);
             }
+        }
+        throw new ConcurrencyRetriesExhaustedException(accountId, MAX_ATTEMPTS);
+    }
+
+    /**
+     * Like {@link #execute}, but records an idempotency key with the append. Used by the
+     * transfer saga to stamp the client's key onto the source atomically with the debit, so
+     * a retried transfer is caught at its first step and never debits twice.
+     *
+     * <p>Unlike {@link #handle}, this does not swallow a duplicate: a
+     * {@link DuplicateCommandException} propagates to the saga, which decides how to
+     * respond (return the in-flight or finalised outcome). {@code resultJson} is fixed by
+     * the caller — a transfer's placeholder — because it does not depend on the debited
+     * balance.
+     */
+    public Account executeRecording(String accountId, String idempotencyKey, String resultJson,
+                                    Function<Account, List<AccountEvent>> decide) {
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            Account account = repository.load(accountId);
+            long expectedVersion = account.version();
+            List<AccountEvent> newEvents = decide.apply(account);
+            try {
+                repository.append(accountId, expectedVersion, newEvents,
+                        new ProcessedCommand(idempotencyKey, resultJson));
+                account.applyAll(newEvents);
+                return account;
+            } catch (ConcurrencyConflictException conflict) {
+                backOff(attempt);
+            }
+            // DuplicateCommandException deliberately propagates to the saga.
         }
         throw new ConcurrencyRetriesExhaustedException(accountId, MAX_ATTEMPTS);
     }

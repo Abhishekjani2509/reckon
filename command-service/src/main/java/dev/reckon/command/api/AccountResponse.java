@@ -1,6 +1,6 @@
 package dev.reckon.command.api;
 
-import dev.reckon.command.domain.account.Account;
+import dev.reckon.command.application.CommandResult;
 
 /**
  * The account's state after a command was applied.
@@ -19,12 +19,12 @@ public record AccountResponse(
         long balanceMinor,
         long version
 ) {
-    static AccountResponse from(Account account) {
+    static AccountResponse from(CommandResult result) {
         return new AccountResponse(
-                account.accountId(),
-                account.owner(),
-                account.currency(),
-                account.balanceMinor(),
-                account.version());
+                result.accountId(),
+                result.owner(),
+                result.currency(),
+                result.balanceMinor(),
+                result.version());
     }
 }
