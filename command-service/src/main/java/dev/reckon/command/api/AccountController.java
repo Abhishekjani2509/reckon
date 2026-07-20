@@ -2,6 +2,7 @@ package dev.reckon.command.api;
 
 import dev.reckon.command.application.AccountCommandHandler;
 import dev.reckon.command.application.CommandOutcome;
+import dev.reckon.command.application.TransferExecution;
 import dev.reckon.command.application.TransferOutcome;
 import dev.reckon.command.application.TransferSaga;
 import dev.reckon.command.domain.account.AccountCommand;
@@ -87,11 +88,20 @@ public class AccountController {
     @PostMapping("/{sourceAccountId}/transfers")
     public ResponseEntity<TransferResponse> transfer(
             @PathVariable String sourceAccountId, @Valid @RequestBody TransferRequest request) {
-        TransferOutcome outcome = transferSaga.execute(new AccountCommand.Transfer(
+        TransferExecution execution = transferSaga.execute(new AccountCommand.Transfer(
                 sourceAccountId, request.destinationAccountId(),
                 request.amountMinor(), request.currency(), request.idempotencyKey()));
 
-        HttpStatus status = outcome.isCompensated() ? HttpStatus.UNPROCESSABLE_ENTITY : HttpStatus.OK;
-        return ResponseEntity.status(status).body(TransferResponse.from(outcome));
+        TransferOutcome outcome = execution.outcome();
+        // COMPLETED -> 200, COMPENSATED -> 422 (failed but consistent), PENDING -> 202
+        // (a retry landed while the original is still in flight; it did not debit again).
+        HttpStatus status = switch (outcome.status()) {
+            case COMPLETED -> HttpStatus.OK;
+            case COMPENSATED -> HttpStatus.UNPROCESSABLE_ENTITY;
+            case PENDING -> HttpStatus.ACCEPTED;
+        };
+        return ResponseEntity.status(status)
+                .header("Idempotent-Replayed", String.valueOf(execution.replayed()))
+                .body(TransferResponse.from(outcome));
     }
 }

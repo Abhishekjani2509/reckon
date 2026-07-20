@@ -1,7 +1,10 @@
 package dev.reckon.command.application;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.reckon.command.domain.account.Account;
 import dev.reckon.command.domain.account.AccountCommand;
+import dev.reckon.command.eventstore.DuplicateCommandException;
+import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,24 +35,44 @@ public class TransferSaga {
     private static final Logger log = LoggerFactory.getLogger(TransferSaga.class);
 
     private final AccountCommandHandler handler;
+    private final IdempotencyStore idempotencyStore;
+    private final ObjectMapper objectMapper;
 
-    public TransferSaga(AccountCommandHandler handler) {
+    public TransferSaga(AccountCommandHandler handler, IdempotencyStore idempotencyStore,
+                        ObjectMapper objectMapper) {
         this.handler = handler;
+        this.idempotencyStore = idempotencyStore;
+        this.objectMapper = objectMapper;
     }
 
-    public TransferOutcome execute(AccountCommand.Transfer command) {
-        String transferId = "txf_" + UUID.randomUUID();
+    public TransferExecution execute(AccountCommand.Transfer command) {
         String source = command.accountId();
         String destination = command.destinationAccountId();
         long amount = command.amountMinor();
         String currency = command.currency();
         String key = command.idempotencyKey();
 
-        // Step 1: initiate + debit the source. A domain failure here (unknown source,
-        // wrong currency, overdraft, self-transfer) rejects the transfer outright — no
-        // money has moved, so there is nothing to compensate; the exception propagates.
-        handler.execute(source, account ->
-                account.decideTransferDebit(transferId, destination, amount, currency, key + ":debit"));
+        // Fast path: a transfer we have already begun (its key recorded on the source)
+        // returns its stored outcome without running the saga again — no second debit.
+        Optional<TransferOutcome> replay = idempotencyStore.find(source, key).map(this::readOutcome);
+        if (replay.isPresent()) {
+            return new TransferExecution(replay.get(), true);
+        }
+
+        String transferId = "txf_" + UUID.randomUUID();
+        TransferOutcome pending = TransferOutcome.pending(transferId, source, destination, amount, currency);
+
+        // Step 1: initiate + debit the source, stamping the client's key onto the source in
+        // the SAME transaction. A domain failure (unknown source, wrong currency, overdraft,
+        // self-transfer) rejects the transfer before anything is recorded, and the exception
+        // propagates. A DuplicateCommandException means a concurrent retry already began this
+        // transfer — return its (in-flight or finalised) outcome rather than debit again.
+        try {
+            handler.executeRecording(source, key, writeOutcome(pending), account ->
+                    account.decideTransferDebit(transferId, destination, amount, currency, key + ":debit"));
+        } catch (DuplicateCommandException duplicate) {
+            return new TransferExecution(readOutcome(idempotencyStore.find(source, key).orElseThrow()), true);
+        }
 
         // Step 2: credit the destination. This is the step that can fail after money has
         // already left the source.
@@ -69,12 +92,16 @@ public class TransferSaga {
                 account.decideTransferComplete(transferId, key + ":complete"));
 
         log.info("transfer {} completed: {} -> {} ({} minor)", transferId, source, destination, amount);
-        return TransferOutcome.completed(transferId, source, destination, amount, currency,
+        TransferOutcome outcome = TransferOutcome.completed(transferId, source, destination, amount, currency,
                 completedSource.balanceMinor());
+        // Turn the PENDING placeholder into the terminal outcome, so a later retry replays
+        // the real result.
+        idempotencyStore.finalise(source, key, writeOutcome(outcome));
+        return new TransferExecution(outcome, false);
     }
 
-    private TransferOutcome compensate(String transferId, String source, String destination,
-                                       long amount, String currency, String key, RuntimeException cause) {
+    private TransferExecution compensate(String transferId, String source, String destination,
+                                         long amount, String currency, String key, RuntimeException cause) {
         log.warn("transfer {} credit to {} failed ({}); compensating source {}",
                 transferId, destination, cause.getMessage(), source);
 
@@ -86,7 +113,25 @@ public class TransferSaga {
         Account compensatedSource = handler.execute(source, account ->
                 account.decideTransferCompensate(transferId, amount, currency, cause.getMessage(), key + ":compensate"));
 
-        return TransferOutcome.compensated(transferId, source, destination, amount, currency,
+        TransferOutcome outcome = TransferOutcome.compensated(transferId, source, destination, amount, currency,
                 compensatedSource.balanceMinor(), cause.getMessage());
+        idempotencyStore.finalise(source, key, writeOutcome(outcome));
+        return new TransferExecution(outcome, false);
+    }
+
+    private TransferOutcome readOutcome(String json) {
+        try {
+            return objectMapper.readValue(json, TransferOutcome.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("could not read stored transfer outcome: " + json, e);
+        }
+    }
+
+    private String writeOutcome(TransferOutcome outcome) {
+        try {
+            return objectMapper.writeValueAsString(outcome);
+        } catch (Exception e) {
+            throw new IllegalStateException("could not serialise transfer outcome", e);
+        }
     }
 }
