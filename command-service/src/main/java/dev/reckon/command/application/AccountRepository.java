@@ -4,6 +4,7 @@ import dev.reckon.command.domain.account.Account;
 import dev.reckon.command.domain.account.AccountEvent;
 import dev.reckon.command.eventstore.EventStore;
 import dev.reckon.command.eventstore.NewEvent;
+import dev.reckon.command.eventstore.ProcessedCommand;
 import java.util.List;
 import org.springframework.stereotype.Repository;
 
@@ -48,9 +49,24 @@ public class AccountRepository {
      *     writer claimed the next version first
      */
     public void append(String accountId, long expectedVersion, List<AccountEvent> events) {
-        List<NewEvent> serialised = events.stream()
+        eventStore.append(accountId, AGGREGATE_TYPE, expectedVersion, serialise(events));
+    }
+
+    /**
+     * Appends events and records an idempotency row atomically.
+     *
+     * @throws dev.reckon.command.eventstore.DuplicateCommandException if the key was
+     *     already recorded for this account
+     * @throws dev.reckon.command.eventstore.ConcurrencyConflictException if another
+     *     writer claimed the next version first
+     */
+    public void append(String accountId, long expectedVersion, List<AccountEvent> events, ProcessedCommand idempotency) {
+        eventStore.append(accountId, AGGREGATE_TYPE, expectedVersion, serialise(events), idempotency);
+    }
+
+    private List<NewEvent> serialise(List<AccountEvent> events) {
+        return events.stream()
                 .map(event -> new NewEvent(codec.typeName(event), codec.toJson(event)))
                 .toList();
-        eventStore.append(accountId, AGGREGATE_TYPE, expectedVersion, serialised);
     }
 }
