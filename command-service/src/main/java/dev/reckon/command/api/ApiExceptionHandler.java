@@ -42,6 +42,12 @@ class ApiExceptionHandler {
         return problem(HttpStatus.UNPROCESSABLE_ENTITY, "Currency mismatch", e.getMessage());
     }
 
+    /** A well-formed but nonsensical request (source equals destination). */
+    @ExceptionHandler(AccountExceptions.SelfTransferNotAllowed.class)
+    ProblemDetail selfTransfer(AccountExceptions.SelfTransferNotAllowed e) {
+        return problem(HttpStatus.BAD_REQUEST, "Self-transfer not allowed", e.getMessage());
+    }
+
     /**
      * 503 with Retry-After semantics rather than 409: nothing is wrong with the command,
      * the account was simply too busy. It may well succeed unchanged a moment later, and

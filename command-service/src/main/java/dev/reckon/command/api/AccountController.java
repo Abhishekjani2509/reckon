@@ -1,11 +1,14 @@
 package dev.reckon.command.api;
 
 import dev.reckon.command.application.AccountCommandHandler;
+import dev.reckon.command.application.TransferOutcome;
+import dev.reckon.command.application.TransferSaga;
 import dev.reckon.command.domain.account.Account;
 import dev.reckon.command.domain.account.AccountCommand;
 import jakarta.validation.Valid;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -28,9 +31,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class AccountController {
 
     private final AccountCommandHandler handler;
+    private final TransferSaga transferSaga;
 
-    public AccountController(AccountCommandHandler handler) {
+    public AccountController(AccountCommandHandler handler, TransferSaga transferSaga) {
         this.handler = handler;
+        this.transferSaga = transferSaga;
     }
 
     @PostMapping
@@ -58,5 +63,25 @@ public class AccountController {
         Account account = handler.handle(new AccountCommand.Withdraw(
                 accountId, request.amountMinor(), request.currency(), request.idempotencyKey()));
         return AccountResponse.from(account);
+    }
+
+    /**
+     * Runs a transfer saga from the path account to the request's destination.
+     *
+     * <p>200 when the transfer completed; 422 when it was compensated — a step failed, the
+     * debit was reversed, and the body's {@code failureReason} says why. A compensated
+     * transfer is the saga behaving correctly, but the funds did not move, so it is not a
+     * 2xx success. Domain rejections before any money moves (overdraft, unknown source,
+     * self-transfer) surface through the normal exception handler.
+     */
+    @PostMapping("/{sourceAccountId}/transfers")
+    public ResponseEntity<TransferResponse> transfer(
+            @PathVariable String sourceAccountId, @Valid @RequestBody TransferRequest request) {
+        TransferOutcome outcome = transferSaga.execute(new AccountCommand.Transfer(
+                sourceAccountId, request.destinationAccountId(),
+                request.amountMinor(), request.currency(), request.idempotencyKey()));
+
+        HttpStatus status = outcome.isCompensated() ? HttpStatus.UNPROCESSABLE_ENTITY : HttpStatus.OK;
+        return ResponseEntity.status(status).body(TransferResponse.from(outcome));
     }
 }
