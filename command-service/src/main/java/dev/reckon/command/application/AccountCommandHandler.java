@@ -57,12 +57,39 @@ public class AccountCommandHandler {
     private final AccountRepository repository;
     private final IdempotencyStore idempotencyStore;
     private final ObjectMapper objectMapper;
+    private final int snapshotInterval;
 
     public AccountCommandHandler(AccountRepository repository, IdempotencyStore idempotencyStore,
-                                 ObjectMapper objectMapper) {
+                                 ObjectMapper objectMapper,
+                                 @org.springframework.beans.factory.annotation.Value("${reckon.snapshot.interval}") int snapshotInterval) {
         this.repository = repository;
         this.idempotencyStore = idempotencyStore;
         this.objectMapper = objectMapper;
+        this.snapshotInterval = snapshotInterval;
+    }
+
+    /**
+     * Saves a snapshot when the appended versions crossed a snapshot boundary.
+     *
+     * <p>Off the critical path and non-fatal: a snapshot is only an optimisation, so a
+     * failure here is logged and swallowed — the command already succeeded, and the worst
+     * outcome is that the next load replays a few more events. The boundary check uses
+     * integer division rather than {@code version % interval == 0} so a transfer's
+     * two-version jump cannot skip a boundary.
+     */
+    private void maybeSnapshot(Account account, long oldVersion) {
+        long newVersion = account.version();
+        boolean crossedBoundary = oldVersion / snapshotInterval < newVersion / snapshotInterval;
+        if (!crossedBoundary) {
+            return;
+        }
+        try {
+            repository.saveSnapshot(account);
+            log.info("saved snapshot for {} at version {}", account.accountId(), newVersion);
+        } catch (RuntimeException e) {
+            log.warn("failed to save snapshot for {} at version {}: {}",
+                    account.accountId(), newVersion, e.getMessage());
+        }
     }
 
     /**
@@ -94,6 +121,7 @@ public class AccountCommandHandler {
             try {
                 repository.append(accountId, expectedVersion, newEvents,
                         new ProcessedCommand(key, writeResult(result)));
+                maybeSnapshot(account, expectedVersion);
                 return new CommandOutcome(result, false);
             } catch (ConcurrencyConflictException conflict) {
                 log.debug("conflict on {} at version {}, attempt {}/{}: reloading and deciding again",
@@ -157,6 +185,7 @@ public class AccountCommandHandler {
             try {
                 repository.append(accountId, expectedVersion, newEvents);
                 account.applyAll(newEvents);
+                maybeSnapshot(account, expectedVersion);
                 return account;
             } catch (ConcurrencyConflictException conflict) {
                 log.debug("conflict on {} at version {}, attempt {}/{}: reloading and deciding again",
@@ -188,6 +217,7 @@ public class AccountCommandHandler {
                 repository.append(accountId, expectedVersion, newEvents,
                         new ProcessedCommand(idempotencyKey, resultJson));
                 account.applyAll(newEvents);
+                maybeSnapshot(account, expectedVersion);
                 return account;
             } catch (ConcurrencyConflictException conflict) {
                 backOff(attempt);

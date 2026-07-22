@@ -40,6 +40,11 @@ spring:
         enable.idempotence: true
 
 reckon:
+  snapshot:
+    # Save a snapshot each time an account's version crosses a multiple of this. Loads then
+    # replay at most this many events instead of the whole history. Lower = more snapshot
+    # writes but shorter replays; a real system tunes it to the write rate.
+    interval: ${RECKON_SNAPSHOT_INTERVAL:50}
   outbox:
     topic: ${RECKON_OUTBOX_TOPIC:reckon.account.events}
     # Partitions for the account-events topic. Keyed by aggregate_id, so per-account
@@ -54,7 +59,8 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        # loggers lets the load-path log level be flipped at runtime, to observe snapshots.
+        include: health,info,metrics,loggers
   endpoint:
     health:
       # Show the component breakdown, so /actuator/health proves the *database*
