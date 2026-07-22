@@ -54,6 +54,29 @@ public final class Account {
     }
 
     /**
+     * Reconstructs an aggregate from a snapshot, at the snapshot's version. The caller then
+     * folds in the events after that version with {@link #applyAll} to reach current state.
+     *
+     * <p>This is the whole point of snapshots: it sets the folded state directly instead of
+     * replaying from the first event, so load cost is bounded by events-since-snapshot, not
+     * total history.
+     */
+    public static Account fromSnapshot(String accountId, AccountSnapshot snapshot, long version) {
+        Account account = new Account(accountId);
+        account.opened = snapshot.opened();
+        account.owner = snapshot.owner();
+        account.currency = snapshot.currency();
+        account.balanceMinor = snapshot.balanceMinor();
+        account.version = version;
+        return account;
+    }
+
+    /** Captures the current folded state, to persist as a snapshot at {@link #version()}. */
+    public AccountSnapshot snapshotState() {
+        return new AccountSnapshot(opened, owner, currency, balanceMinor);
+    }
+
+    /**
      * Decides what happened, given what was asked and what is already true.
      *
      * <p>Pure: it reads state and returns events without writing anything. Persisting is
