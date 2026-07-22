@@ -1,5 +1,6 @@
 package dev.reckon.query.balance;
 
+import java.util.List;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -17,6 +18,12 @@ public class BalanceReadRepository {
             WHERE account_id = ?
             """;
 
+    private static final String LIST_ACCOUNTS = """
+            SELECT account_id, owner, currency, balance_minor, last_version
+            FROM account_balances
+            ORDER BY owner, account_id
+            """;
+
     private final JdbcTemplate jdbc;
 
     public BalanceReadRepository(JdbcTemplate jdbc) {
@@ -31,5 +38,15 @@ public class BalanceReadRepository {
                         rs.getString("currency"),
                         rs.getLong("last_version")),
                 accountId).stream().findFirst();
+    }
+
+    public List<AccountSummary> findAll() {
+        return jdbc.query(LIST_ACCOUNTS,
+                (rs, n) -> new AccountSummary(
+                        rs.getString("account_id"),
+                        rs.getString("owner"),
+                        rs.getString("currency"),
+                        rs.getLong("balance_minor"),
+                        rs.getLong("last_version")));
     }
 }

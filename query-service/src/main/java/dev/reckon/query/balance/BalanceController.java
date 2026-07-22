@@ -29,6 +29,12 @@ public class BalanceController {
         this.postgres = postgres;
     }
 
+    /** All accounts and their current balances, for the dashboard's account list. */
+    @GetMapping
+    public java.util.List<AccountSummary> list() {
+        return postgres.findAll();
+    }
+
     @GetMapping("/{accountId}/balance")
     public ResponseEntity<BalanceResponse> balance(@PathVariable String accountId) {
         Optional<BalanceResponse> hot = hotBalance.find(accountId);
