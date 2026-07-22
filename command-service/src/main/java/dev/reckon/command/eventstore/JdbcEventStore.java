@@ -35,6 +35,14 @@ public class JdbcEventStore implements EventStore {
             ORDER BY version
             """;
 
+    private static final String LOAD_STREAM_AFTER = """
+            SELECT sequence_number, event_id, aggregate_id, aggregate_type,
+                   version, event_type, payload::text AS payload, occurred_at
+            FROM events
+            WHERE aggregate_id = ? AND version > ?
+            ORDER BY version
+            """;
+
     private static final RowMapper<StoredEvent> ROW_MAPPER = (rs, rowNum) -> new StoredEvent(
             rs.getLong("sequence_number"),
             rs.getObject("event_id", UUID.class),
@@ -56,6 +64,11 @@ public class JdbcEventStore implements EventStore {
     @Override
     public List<StoredEvent> loadStream(String aggregateId) {
         return jdbc.query(LOAD_STREAM, ROW_MAPPER, aggregateId);
+    }
+
+    @Override
+    public List<StoredEvent> loadStreamAfter(String aggregateId, long afterVersion) {
+        return jdbc.query(LOAD_STREAM_AFTER, ROW_MAPPER, aggregateId, afterVersion);
     }
 
     /**

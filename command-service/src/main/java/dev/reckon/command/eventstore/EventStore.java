@@ -22,6 +22,13 @@ public interface EventStore {
     List<StoredEvent> loadStream(String aggregateId);
 
     /**
+     * Events for one aggregate with version strictly greater than {@code afterVersion},
+     * ordered ascending. This is the snapshot-aware load path: replay only what happened
+     * after the snapshot, not the whole history.
+     */
+    List<StoredEvent> loadStreamAfter(String aggregateId, long afterVersion);
+
+    /**
      * Appends events as versions {@code expectedVersion + 1, +2, ...}, atomically.
      *
      * <p>{@code expectedVersion} is the version the caller folded its decision from. If
