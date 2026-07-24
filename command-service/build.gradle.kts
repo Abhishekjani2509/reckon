@@ -35,6 +35,8 @@ dependencies {
     // Exposes /actuator/health, including a `db` check that proves the Postgres
     // connection is live rather than merely that the web server started.
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    // Prometheus registry: exposes /actuator/prometheus for scraping.
+    runtimeOnly("io.micrometer:micrometer-registry-prometheus")
     implementation("org.springframework.boot:spring-boot-starter-validation")
 
     // The Kafka producer for the outbox poller. Only the command service's poller

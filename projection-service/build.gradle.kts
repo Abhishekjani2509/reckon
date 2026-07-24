@@ -28,6 +28,8 @@ dependencies {
     // dirty-checking would only obscure it.
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    // Prometheus registry: exposes /actuator/prometheus for scraping.
+    runtimeOnly("io.micrometer:micrometer-registry-prometheus")
 
     // The Kafka consumer. This service is a consumer, where command-service was a producer.
     implementation("org.springframework.kafka:spring-kafka")

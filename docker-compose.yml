@@ -83,7 +83,58 @@ services:
       retries: 10
       start_period: 5s
 
+  # Day 10 — Observability. Prometheus scrapes the three Spring services (running on the
+  # host) and Grafana renders the dashboards. Both are pure infrastructure: they hold no
+  # source of truth and can be torn down and recreated without touching Reckon's data.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: reckon-prometheus
+    # host.docker.internal is how a container reaches a service on the host. Docker Desktop
+    # provides it automatically; host-gateway makes it resolve on plain Linux Docker too,
+    # so the same compose file works on a laptop and in CI.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9090/-/healthy | grep -q Healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: reckon-grafana
+    environment:
+      # Local development only: skip the login wall so the dashboard opens straight away.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    ports:
+      - "3001:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    volumes:
+      # Provisioning wires up the datasource and dashboard at boot; the dashboards folder
+      # holds the JSON the provider loads.
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/api/health | grep -q ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
 volumes:
   postgres-data:
   redpanda-data:
   redis-data:
+  prometheus-data:
+  grafana-data:

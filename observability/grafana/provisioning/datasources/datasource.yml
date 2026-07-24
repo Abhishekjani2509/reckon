@@ -1,0 +1,15 @@
+# Grafana datasource provisioning: point Grafana at the Prometheus container on the
+# compose network at boot, so there is nothing to click through on first login. The
+# hostname `prometheus` is the compose service name.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # Fixed uid so the provisioned dashboard can bind its panels to this datasource
+    # deterministically instead of relying on an auto-generated id.
+    uid: reckon-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

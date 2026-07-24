@@ -1,0 +1,12 @@
+# Dashboard provisioning: load every dashboard JSON dropped into the mounted folder at
+# boot, so the Reckon dashboard is present the moment Grafana starts — no manual import.
+apiVersion: 1
+
+providers:
+  - name: reckon
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

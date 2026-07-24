@@ -1,0 +1,88 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "title": "Reckon — Observability",
+  "uid": "reckon-observability",
+  "tags": ["reckon"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Command rate (commands/sec)",
+      "description": "Committed write commands per second across the write side.",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "reckon-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "reckon-prometheus" }, "expr": "sum(rate(reckon_commands_committed_total[1m]))" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Projection lag p99",
+      "description": "99th-percentile write-to-read staleness. The key consistency-health signal.",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "reckon-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 3, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.5 }, { "color": "red", "value": 2 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "reckon-prometheus" }, "expr": "histogram_quantile(0.99, sum(rate(reckon_projection_lag_seconds_bucket[1m])) by (le))" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Transfers (5m)",
+      "description": "Transfer saga outcomes over the last 5 minutes.",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "reckon-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "reckon-prometheus" }, "expr": "sum by (outcome) (increase(reckon_transfers_total[5m]))", "legendFormat": "{{outcome}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Command rate",
+      "description": "Committed commands/sec — the write side's throughput over time.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "reckon-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "reckon-prometheus" }, "expr": "sum(rate(reckon_commands_committed_total[1m]))", "legendFormat": "commands/sec" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Projection lag (p50 / p99)",
+      "description": "Time from an event occurring on the write side to it being visible in the read model.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "reckon-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "reckon-prometheus" }, "expr": "histogram_quantile(0.50, sum(rate(reckon_projection_lag_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "reckon-prometheus" }, "expr": "histogram_quantile(0.99, sum(rate(reckon_projection_lag_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Transfer outcomes",
+      "description": "Saga outcome rate by type. A rising 'compensated' line is the failure signal.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "reckon-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "reckon-prometheus" }, "expr": "sum by (outcome) (rate(reckon_transfers_total[1m]))", "legendFormat": "{{outcome}}" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+# Prometheus scrape config for Reckon (Day 10 — Observability).
+#
+# The three Spring services run on the HOST (via `./gradlew bootRun`), not inside this
+# compose network, so Prometheus reaches them through `host.docker.internal` — the
+# Docker-provided alias for the host, wired up by the `extra_hosts` entry in
+# docker-compose.yml so it resolves on Linux as well as Docker Desktop.
+#
+# Spring Boot Actuator serves the metrics at /actuator/prometheus; `metrics_path` points
+# the scraper there instead of the default /metrics.
+
+global:
+  # Scrape every 5s. Projection lag is the signal we most want to watch move in near
+  # real time during a load run, and a coarse interval would smooth away exactly the
+  # spikes that matter.
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: reckon
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels: { service: command-service }
+      - targets: ["host.docker.internal:8081"]
+        labels: { service: projection-service }
+      - targets: ["host.docker.internal:8082"]
+        labels: { service: query-service }

@@ -60,7 +60,8 @@ management:
     web:
       exposure:
         # loggers lets the load-path log level be flipped at runtime, to observe snapshots.
-        include: health,info,metrics,loggers
+        # prometheus is the scrape endpoint Prometheus reads for the Day 10 dashboards.
+        include: health,info,metrics,loggers,prometheus
   endpoint:
     health:
       # Show the component breakdown, so /actuator/health proves the *database*

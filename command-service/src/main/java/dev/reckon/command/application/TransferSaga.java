@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.reckon.command.domain.account.Account;
 import dev.reckon.command.domain.account.AccountCommand;
 import dev.reckon.command.eventstore.DuplicateCommandException;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -37,12 +38,28 @@ public class TransferSaga {
     private final AccountCommandHandler handler;
     private final IdempotencyStore idempotencyStore;
     private final ObjectMapper objectMapper;
+    private final MeterRegistry meters;
 
     public TransferSaga(AccountCommandHandler handler, IdempotencyStore idempotencyStore,
-                        ObjectMapper objectMapper) {
+                        ObjectMapper objectMapper, MeterRegistry meters) {
         this.handler = handler;
         this.idempotencyStore = idempotencyStore;
         this.objectMapper = objectMapper;
+        this.meters = meters;
+    }
+
+    /**
+     * Records one transfer's outcome. {@code reckon.transfers} tagged by
+     * {@code outcome} (completed / compensated / pending) and whether the result was a
+     * {@code replayed} idempotent retry rather than fresh work. The compensated rate —
+     * {@code rate(reckon_transfers_total{outcome="compensated"}[5m])} — is the saga's
+     * failure signal: a step failed after the debit and the money was returned.
+     */
+    private TransferExecution recorded(TransferExecution execution) {
+        meters.counter("reckon.transfers",
+                "outcome", execution.outcome().status().name().toLowerCase(),
+                "replayed", String.valueOf(execution.replayed())).increment();
+        return execution;
     }
 
     public TransferExecution execute(AccountCommand.Transfer command) {
@@ -56,7 +73,7 @@ public class TransferSaga {
         // returns its stored outcome without running the saga again — no second debit.
         Optional<TransferOutcome> replay = idempotencyStore.find(source, key).map(this::readOutcome);
         if (replay.isPresent()) {
-            return new TransferExecution(replay.get(), true);
+            return recorded(new TransferExecution(replay.get(), true));
         }
 
         String transferId = "txf_" + UUID.randomUUID();
@@ -71,7 +88,7 @@ public class TransferSaga {
             handler.executeRecording(source, key, writeOutcome(pending), account ->
                     account.decideTransferDebit(transferId, destination, amount, currency, key + ":debit"));
         } catch (DuplicateCommandException duplicate) {
-            return new TransferExecution(readOutcome(idempotencyStore.find(source, key).orElseThrow()), true);
+            return recorded(new TransferExecution(readOutcome(idempotencyStore.find(source, key).orElseThrow()), true));
         }
 
         // Step 2: credit the destination. This is the step that can fail after money has
@@ -97,7 +114,7 @@ public class TransferSaga {
         // Turn the PENDING placeholder into the terminal outcome, so a later retry replays
         // the real result.
         idempotencyStore.finalise(source, key, writeOutcome(outcome));
-        return new TransferExecution(outcome, false);
+        return recorded(new TransferExecution(outcome, false));
     }
 
     private TransferExecution compensate(String transferId, String source, String destination,
@@ -116,7 +133,7 @@ public class TransferSaga {
         TransferOutcome outcome = TransferOutcome.compensated(transferId, source, destination, amount, currency,
                 compensatedSource.balanceMinor(), cause.getMessage());
         idempotencyStore.finalise(source, key, writeOutcome(outcome));
-        return new TransferExecution(outcome, false);
+        return recorded(new TransferExecution(outcome, false));
     }
 
     private TransferOutcome readOutcome(String json) {

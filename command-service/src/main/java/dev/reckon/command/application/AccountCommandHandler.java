@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.reckon.command.eventstore.ConcurrencyConflictException;
 import dev.reckon.command.eventstore.DuplicateCommandException;
 import dev.reckon.command.eventstore.ProcessedCommand;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
@@ -59,13 +61,25 @@ public class AccountCommandHandler {
     private final ObjectMapper objectMapper;
     private final int snapshotInterval;
 
+    /**
+     * Counts every command whose events were durably appended. Placed at the append
+     * choke point rather than at the HTTP layer so a saga's individual steps count too,
+     * and so a rejected or conflict-exhausted command never inflates the number. Its rate
+     * — {@code rate(reckon_commands_committed_total[1m])} — is the write side's
+     * headline throughput.
+     */
+    private final Counter commandsCommitted;
+
     public AccountCommandHandler(AccountRepository repository, IdempotencyStore idempotencyStore,
-                                 ObjectMapper objectMapper,
+                                 ObjectMapper objectMapper, MeterRegistry meters,
                                  @org.springframework.beans.factory.annotation.Value("${reckon.snapshot.interval}") int snapshotInterval) {
         this.repository = repository;
         this.idempotencyStore = idempotencyStore;
         this.objectMapper = objectMapper;
         this.snapshotInterval = snapshotInterval;
+        this.commandsCommitted = Counter.builder("reckon.commands.committed")
+                .description("Commands whose events were durably appended to the event store")
+                .register(meters);
     }
 
     /**
@@ -122,6 +136,7 @@ public class AccountCommandHandler {
                 repository.append(accountId, expectedVersion, newEvents,
                         new ProcessedCommand(key, writeResult(result)));
                 maybeSnapshot(account, expectedVersion);
+                commandsCommitted.increment();
                 return new CommandOutcome(result, false);
             } catch (ConcurrencyConflictException conflict) {
                 log.debug("conflict on {} at version {}, attempt {}/{}: reloading and deciding again",
@@ -186,6 +201,7 @@ public class AccountCommandHandler {
                 repository.append(accountId, expectedVersion, newEvents);
                 account.applyAll(newEvents);
                 maybeSnapshot(account, expectedVersion);
+                commandsCommitted.increment();
                 return account;
             } catch (ConcurrencyConflictException conflict) {
                 log.debug("conflict on {} at version {}, attempt {}/{}: reloading and deciding again",
@@ -218,6 +234,7 @@ public class AccountCommandHandler {
                         new ProcessedCommand(idempotencyKey, resultJson));
                 account.applyAll(newEvents);
                 maybeSnapshot(account, expectedVersion);
+                commandsCommitted.increment();
                 return account;
             } catch (ConcurrencyConflictException conflict) {
                 backOff(attempt);

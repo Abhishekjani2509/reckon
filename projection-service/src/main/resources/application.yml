@@ -58,7 +58,8 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        # prometheus is the scrape endpoint Prometheus reads for the Day 10 dashboards.
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: always
